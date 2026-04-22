@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, execFileSync, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { LogStore } from './log-store.js';
 import { detectAdapter } from './adapters/registry.js';
@@ -47,7 +47,7 @@ export class ProcessManager {
     log(`Checking ${orphans.length} previously active process(es) for dangling PIDs...`);
 
     for (const row of orphans) {
-      const isAlive = row.pid != null && isPidAlive(row.pid);
+      const isAlive = row.pid != null && isPidOurs(row.pid, row.command, row.projectPath);
       const status: ProcessStatus = isAlive ? 'orphaned' : 'crashed';
 
       this.store.updateStatus(row.name, status);
@@ -329,6 +329,30 @@ function isPidAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Verify that the process at `pid` is actually the one we spawned by checking
+ * its command line via `ps`. Guards against PID recycling — the OS may have
+ * reused the PID for an unrelated process after our process died.
+ *
+ * Checks that ps output contains the executable (e.g. "fvm"/"flutter") or
+ * the project path — either is sufficient to confirm identity.
+ */
+function isPidOurs(pid: number, command: string, projectPath: string): boolean {
+  try {
+    const psOutput = execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf-8',
+      timeout: 2000,
+    }).trim();
+
+    if (!psOutput) return false;
+
+    const executable = command.split(' ')[0]; // e.g. "fvm" or "flutter"
+    return psOutput.includes(executable) || psOutput.includes(projectPath);
+  } catch {
+    return false; // ps failed or PID doesn't exist — not ours
   }
 }
 
