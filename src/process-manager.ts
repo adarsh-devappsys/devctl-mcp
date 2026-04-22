@@ -334,25 +334,38 @@ function isPidAlive(pid: number): boolean {
 
 /**
  * Verify that the process at `pid` is actually the one we spawned by checking
- * its command line via `ps`. Guards against PID recycling — the OS may have
- * reused the PID for an unrelated process after our process died.
+ * its command line. Guards against PID recycling — the OS may have reused the
+ * PID for an unrelated process after our process died.
  *
- * Checks that ps output contains the executable (e.g. "fvm"/"flutter") or
- * the project path — either is sufficient to confirm identity.
+ * Checks that the running command contains our executable or project path.
+ * Cross-platform: uses `ps` on Unix/macOS, PowerShell on Windows.
  */
 function isPidOurs(pid: number, command: string, projectPath: string): boolean {
   try {
-    const psOutput = execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
-      encoding: 'utf-8',
-      timeout: 2000,
-    }).trim();
+    let cmdLine: string;
 
-    if (!psOutput) return false;
+    if (process.platform === 'win32') {
+      // PowerShell: Get-CimInstance works on Windows 7+ (PowerShell 3+)
+      cmdLine = execFileSync(
+        'powershell',
+        ['-NoProfile', '-Command',
+         `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`],
+        { encoding: 'utf-8', timeout: 3000 }
+      ).trim();
+    } else {
+      // macOS / Linux: args= gives the full argument list (command= can truncate)
+      cmdLine = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+        encoding: 'utf-8',
+        timeout: 2000,
+      }).trim();
+    }
 
-    const executable = command.split(' ')[0]; // e.g. "fvm" or "flutter"
-    return psOutput.includes(executable) || psOutput.includes(projectPath);
+    if (!cmdLine) return false;
+
+    const executable = command.split(' ')[0]; // e.g. "fvm", "flutter", "node"
+    return cmdLine.includes(executable) || cmdLine.includes(projectPath);
   } catch {
-    return false; // ps failed or PID doesn't exist — not ours
+    return false; // command failed or PID doesn't exist — assume not ours
   }
 }
 

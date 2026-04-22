@@ -8,8 +8,10 @@ function fileExists(p: string): boolean {
 }
 
 function isFvmInstalled(): Promise<boolean> {
+  // 'which' on Unix/macOS, 'where' on Windows
+  const cmd = process.platform === 'win32' ? 'where' : 'which';
   return new Promise(resolve => {
-    const proc = spawn('which', ['fvm'], { stdio: 'ignore' });
+    const proc = spawn(cmd, ['fvm'], { stdio: 'ignore' });
     proc.on('close', code => resolve(code === 0));
     proc.on('error', () => resolve(false));
   });
