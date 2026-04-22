@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ProcessManager } from './process-manager.js';
+import { Store } from './store.js';
 import { registerProcessTools } from './tools/process-tools.js';
 import { registerFlutterTools } from './tools/flutter-tools.js';
 
@@ -10,7 +11,11 @@ const log = (...args: unknown[]) =>
 async function main() {
   log('Starting devctl-mcp server...');
 
-  const processManager = new ProcessManager();
+  const store = new Store();
+  const processManager = new ProcessManager(store);
+
+  // Recover any processes that were running when the server last shut down
+  await processManager.recoverOrphans();
 
   const server = new McpServer(
     {
@@ -34,6 +39,7 @@ async function main() {
   const shutdown = async () => {
     log('Shutting down — stopping all processes...');
     await processManager.stopAll();
+    store.close();
     await server.close();
     process.exit(0);
   };

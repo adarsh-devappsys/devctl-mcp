@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { LogStore } from './log-store.js';
 import { detectAdapter } from './adapters/registry.js';
+import { Store } from './store.js';
 import type {
   ManagedProcess,
   ProcessSummary,
@@ -24,14 +25,61 @@ const VM_SERVICE_PATTERN2 = /Flutter run key commands.*\nDart VM Service: (https
 interface ProcessRecord {
   meta: ManagedProcess;
   logs: LogStore;
-  process: ChildProcess;
+  process: ChildProcess | null; // null for orphaned processes
   projectPath: string;
   options: StartOptions;
-  adapter: Adapter;
+  adapter: Adapter | null; // null for orphaned processes
 }
 
 export class ProcessManager {
   private registry = new Map<string, ProcessRecord>();
+  private store: Store;
+
+  constructor(store: Store) {
+    this.store = store;
+  }
+
+  /** Called once at startup — loads previously running processes and checks if their PIDs are alive. */
+  async recoverOrphans(): Promise<void> {
+    const orphans = this.store.getOrphans();
+    if (orphans.length === 0) return;
+
+    log(`Checking ${orphans.length} previously active process(es) for dangling PIDs...`);
+
+    for (const row of orphans) {
+      const isAlive = row.pid != null && isPidAlive(row.pid);
+      const status: ProcessStatus = isAlive ? 'orphaned' : 'crashed';
+
+      this.store.updateStatus(row.name, status);
+
+      const options: StartOptions = JSON.parse(row.optionsJson ?? '{}');
+
+      const meta: ManagedProcess = {
+        name: row.name,
+        projectPath: row.projectPath,
+        framework: row.framework,
+        status,
+        pid: row.pid ?? undefined,
+        startedAt: row.startedAt ?? undefined,
+        command: row.command,
+        vmServiceUrl: row.vmServiceUrl ?? undefined,
+      };
+
+      this.registry.set(row.name, {
+        meta,
+        logs: new LogStore(),
+        process: null,
+        projectPath: row.projectPath,
+        options,
+        adapter: null,
+      });
+
+      log(
+        `  "${row.name}" (PID ${row.pid}) → ${status}` +
+        (isAlive ? ' — call stop_process to kill it' : '')
+      );
+    }
+  }
 
   async start(
     name: string,
@@ -43,8 +91,17 @@ export class ProcessManager {
     }
 
     const existing = this.registry.get(name);
-    if (existing && (existing.meta.status === 'running' || existing.meta.status === 'starting')) {
-      throw new Error(`Process "${name}" is already ${existing.meta.status}. Stop it first.`);
+    if (existing) {
+      const s = existing.meta.status;
+      if (s === 'running' || s === 'starting') {
+        throw new Error(`Process "${name}" is already ${s}. Stop it first.`);
+      }
+      if (s === 'orphaned') {
+        throw new Error(
+          `Process "${name}" is orphaned (PID ${existing.meta.pid} may still be running). ` +
+          `Call stop_process first to kill the dangling process.`
+        );
+      }
     }
 
     const adapter = await detectAdapter(projectPath);
@@ -80,6 +137,7 @@ export class ProcessManager {
     };
 
     this.registry.set(name, record);
+    this.store.upsert(meta, options);
 
     // Pipe stdout
     child.stdout?.setEncoding('utf-8');
@@ -91,6 +149,8 @@ export class ProcessManager {
         if (meta.status === 'starting') {
           meta.status = 'running';
           meta.startedAt = Date.now();
+          this.store.updateStatus(name, 'running');
+          this.store.updateStartedAt(name, meta.startedAt);
         }
         this.parseVmServiceUrl(meta, line);
       }
@@ -106,6 +166,8 @@ export class ProcessManager {
         if (meta.status === 'starting') {
           meta.status = 'running';
           meta.startedAt = Date.now();
+          this.store.updateStatus(name, 'running');
+          this.store.updateStartedAt(name, meta.startedAt);
         }
         this.parseVmServiceUrl(meta, line);
       }
@@ -117,6 +179,7 @@ export class ProcessManager {
       meta.exitSignal = signal ?? undefined;
       const wasRunning = meta.status !== 'stopping';
       meta.status = code === 0 ? 'stopped' : 'crashed';
+      this.store.updateStatus(name, meta.status);
       const msg = `[devctl-mcp] Process exited: code=${code ?? 'null'} signal=${signal ?? 'null'}`;
       logs.append('stderr', msg);
       log(`"${name}" ${wasRunning && code !== 0 ? 'crashed' : 'stopped'} (code=${code})`);
@@ -124,6 +187,7 @@ export class ProcessManager {
 
     child.on('error', (err) => {
       meta.status = 'crashed';
+      this.store.updateStatus(name, 'crashed');
       logs.append('stderr', `[devctl-mcp] Spawn error: ${err.message}`);
       log(`"${name}" spawn error: ${err.message}`);
     });
@@ -135,10 +199,23 @@ export class ProcessManager {
     const record = this.registry.get(name);
     if (!record) throw new Error(`No process named "${name}"`);
 
-    const { meta, process: child } = record;
+    const { meta } = record;
+
+    // Orphaned process — kill by PID directly since we have no ChildProcess handle
+    if (meta.status === 'orphaned' && meta.pid != null) {
+      log(`Killing orphaned process "${name}" (PID ${meta.pid})`);
+      killPid(meta.pid);
+      meta.status = 'stopped';
+      this.store.updateStatus(name, 'stopped');
+      return;
+    }
+
     if (meta.status === 'stopped' || meta.status === 'crashed') {
       return; // Already stopped
     }
+
+    const child = record.process;
+    if (!child) return;
 
     meta.status = 'stopping';
 
@@ -211,7 +288,7 @@ export class ProcessManager {
   sendInput(name: string, text: string): void {
     const record = this.registry.get(name);
     if (!record) throw new Error(`No process named "${name}"`);
-    if (!record.process.stdin) throw new Error(`Process "${name}" has no stdin`);
+    if (!record.process?.stdin) throw new Error(`Process "${name}" has no stdin`);
     record.process.stdin.write(text + '\n');
   }
 
@@ -228,6 +305,7 @@ export class ProcessManager {
 
     const httpUrl = m[1].trim();
     meta.vmServiceUrl = httpUrl;
+    this.store.updateVmServiceUrl(meta.name, httpUrl);
 
     // Derive WebSocket URL: http://host:port/token=/ → ws://host:port/token=/ws
     try {
@@ -241,4 +319,27 @@ export class ProcessManager {
       // Not a valid URL, ignore
     }
   }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // signal 0 = existence check, doesn't kill
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function killPid(pid: number): void {
+  try {
+    process.kill(pid, 'SIGTERM');
+    // Give it 3 seconds then SIGKILL
+    setTimeout(() => {
+      try {
+        if (isPidAlive(pid)) process.kill(pid, 'SIGKILL');
+      } catch { /* already dead */ }
+    }, 3000);
+  } catch { /* already dead */ }
 }

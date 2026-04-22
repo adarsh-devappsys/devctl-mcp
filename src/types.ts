@@ -13,7 +13,8 @@ export type ProcessStatus =
   | 'running'
   | 'stopping'
   | 'stopped'
-  | 'crashed';
+  | 'crashed'
+  | 'orphaned'; // was running when MCP server last died; PID may still be alive
 
 export type FrameworkType =
   | 'flutter'
