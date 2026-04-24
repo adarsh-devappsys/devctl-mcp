@@ -45,6 +45,8 @@ export function registerProcessTools(server: McpServer, pm: ProcessManager): voi
         .describe('Custom command (required for unrecognized frameworks, e.g. "python manage.py runserver")'),
       custom_args: z.array(z.string()).optional()
         .describe('Additional arguments appended to the run command'),
+      env: z.record(z.string()).optional()
+        .describe('Environment variables to set for the process (e.g. {"SPRING_PROFILES_ACTIVE": "local", "DATABASE_URL": "jdbc:..."})'),
     },
     async (args) => {
       try {
@@ -55,6 +57,7 @@ export function registerProcessTools(server: McpServer, pm: ProcessManager): voi
           buildTool: args.build_tool,
           command: args.command,
           customArgs: args.custom_args,
+          env: args.env,
         });
         return ok({
           message: `Started "${args.name}" [${meta.framework}]`,

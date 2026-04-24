@@ -111,7 +111,7 @@ export class ProcessManager {
 
     const child = spawn(spawnCmd.executable, spawnCmd.args, {
       cwd: spawnCmd.cwd,
-      env: { ...process.env, ...spawnCmd.env },
+      env: { ...process.env, ...spawnCmd.env, ...options.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

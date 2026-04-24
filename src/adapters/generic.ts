@@ -15,11 +15,14 @@ export class GenericAdapter implements Adapter {
       );
     }
 
-    // Split command into executable + args
-    const parts = options.command.trim().split(/\s+/);
-    const executable = parts[0];
-    const args = [...parts.slice(1), ...(options.customArgs ?? [])];
+    // Use shell execution to support env vars (FOO=bar cmd), pipes, redirects, etc.
+    const fullCommand = options.customArgs?.length
+      ? `${options.command} ${options.customArgs.join(' ')}`
+      : options.command;
 
-    return { executable, args, cwd: projectPath };
+    const shell = process.platform === 'win32' ? 'cmd' : '/bin/sh';
+    const shellFlag = process.platform === 'win32' ? '/c' : '-c';
+
+    return { executable: shell, args: [shellFlag, fullCommand], cwd: projectPath };
   }
 }

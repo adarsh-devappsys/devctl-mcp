@@ -61,6 +61,8 @@ export interface StartOptions {
   // Generic
   command?: string;
   customArgs?: string[];
+  // All frameworks
+  env?: Record<string, string>;
 }
 
 export interface SpawnCommand {
